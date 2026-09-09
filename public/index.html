@@ -1,0 +1,621 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Scale Ops — Weighing machine tracker</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<style>
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: Inter, system-ui, sans-serif; background: #F6F4EF; color: #1C2B39; }
+  input, select, button { font-family: inherit; }
+  ::placeholder { color: #9AA3A8; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-presets="react">
+
+const { useState, useEffect, useMemo, useRef } = React;
+
+const BRAND = {
+  ink: "#1C2B39", inkSoft: "#4B5B67", paper: "#F6F4EF", card: "#FFFFFF",
+  brass: "#A8711E", green: "#2F6844", greenSoft: "#E3EEE6",
+  red: "#9B2C2C", redSoft: "#F5E4E2", amber: "#B7791F", amberSoft: "#FBF0DC",
+  line: "#E4DFD3",
+};
+
+const TOKEN_KEY = "scaleops_token";
+
+function authHeaders() {
+  const t = localStorage.getItem(TOKEN_KEY);
+  return t ? { Authorization: "Bearer " + t } : {};
+}
+
+async function api(path, opts) {
+  const res = await fetch("/api" + path, {
+    ...opts,
+    headers: { "Content-Type": "application/json", ...authHeaders(), ...(opts && opts.headers) },
+  });
+  if (res.status === 401) {
+    localStorage.removeItem(TOKEN_KEY);
+    window.location.reload();
+    throw new Error("Signed out");
+  }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || "Something went wrong");
+  return data;
+}
+
+function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2, 7); }
+
+function daysUntil(dateStr) {
+  if (!dateStr) return null;
+  const target = new Date(dateStr + "T00:00:00");
+  if (isNaN(target)) return null;
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  return Math.round((target - today) / 86400000);
+}
+function fmtDate(dateStr) {
+  if (!dateStr) return "—";
+  const d = new Date(dateStr + "T00:00:00");
+  if (isNaN(d)) return dateStr;
+  return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+}
+
+const FIELD_SCHEMAS = {
+  branches: [
+    { key: "solId", label: "SOL ID", required: true, mono: true },
+    { key: "name", label: "Branch name" },
+    { key: "address", label: "Address", full: true },
+    { key: "city", label: "City" }, { key: "state", label: "State" }, { key: "zipcode", label: "Pincode" },
+    { key: "managerName", label: "Manager name" },
+    { key: "managerEmail", label: "Manager email", type: "email" },
+    { key: "managerPhone", label: "Manager phone" },
+  ],
+  orders: [
+    { key: "poNumber", label: "PO number", required: true, mono: true },
+    { key: "solId", label: "SOL ID", required: true, mono: true, branchRef: true },
+    { key: "activityType", label: "Activity type", type: "select", options: ["New Branches", "Replacement of Old Assets", "Other"] },
+    { key: "paymentStatus", label: "Payment status", type: "select", options: ["PENDING", "PAID"] },
+    { key: "poReceivedDate", label: "PO received date", type: "date" },
+    { key: "model", label: "Machine model" },
+    { key: "estDispatchDate", label: "Est. dispatch date", type: "date" },
+    { key: "awb", label: "AWB number", mono: true },
+    { key: "estDeliveryDate", label: "Est. delivery date", type: "date" },
+    { key: "status", label: "Status", type: "select", options: ["Order placed", "Dispatched", "Delivered", "Order cancelled"] },
+    { key: "deliveryDate", label: "Delivery date", type: "date" },
+    { key: "podReceived", label: "POD received", type: "select", options: ["NO", "YES"] },
+    { key: "invoiceNo", label: "Invoice number", mono: true },
+    { key: "certificateNo", label: "Certificate number", mono: true },
+    { key: "certificateDate", label: "Certificate date", type: "date" },
+    { key: "dueDate", label: "Renewal due date", type: "date" },
+  ],
+  restampings: [
+    { key: "poNumber", label: "PO number", required: true, mono: true },
+    { key: "solId", label: "SOL ID", required: true, mono: true, branchRef: true },
+    { key: "jobType", label: "Job type", type: "select", options: ["Restamping", "New machine"] },
+    { key: "oldSerial", label: "Old serial number", mono: true },
+    { key: "model", label: "Machine model" },
+    { key: "dueDate", label: "Due date", type: "date" },
+    { key: "jobCompleted", label: "Job completed", type: "select", options: ["NO", "YES"] },
+    { key: "estDispatchDate", label: "Est. dispatch date", type: "date" },
+    { key: "awb", label: "AWB number", mono: true },
+    { key: "status", label: "Status", type: "select", options: ["Order placed", "Dispatched", "Delivered"] },
+    { key: "deliveryDate", label: "Delivery date", type: "date" },
+    { key: "oldMachinePickupDate", label: "Old machine pickup date", type: "date" },
+    { key: "certificateNo", label: "Certificate number", mono: true },
+    { key: "certificateDate", label: "Certificate date", type: "date" },
+    { key: "newDueDate", label: "New due date", type: "date" },
+    { key: "vendorName", label: "Vendor name" },
+    { key: "amount", label: "Amount", type: "number" },
+  ],
+  replacements: [
+    { key: "date", label: "Date logged", type: "date" },
+    { key: "solId", label: "SOL ID", required: true, mono: true, branchRef: true },
+    { key: "orderType", label: "Order type", type: "select", options: ["1ST YEAR", "2ND YEAR", "OUT OF WARRANTY"] },
+    { key: "type", label: "Type", type: "select", options: ["SPARE", "REPLACEMENT"] },
+    { key: "modelSpare", label: "Model / spare" },
+    { key: "dateDispatch", label: "Date of dispatch", type: "date" },
+    { key: "awb", label: "AWB number", mono: true },
+    { key: "dateDelivery", label: "Date of delivery", type: "date" },
+    { key: "status", label: "Status", type: "select", options: ["Pending", "Dispatched", "Delivered"] },
+  ],
+};
+
+const TABS = [
+  { key: "dashboard", label: "Dashboard" },
+  { key: "branches", label: "Branches" },
+  { key: "orders", label: "New orders" },
+  { key: "restampings", label: "Restamping" },
+  { key: "replacements", label: "Replacements" },
+];
+
+function Badge({ tone, children }) {
+  const tones = {
+    red: { bg: BRAND.redSoft, fg: BRAND.red }, amber: { bg: BRAND.amberSoft, fg: BRAND.amber },
+    green: { bg: BRAND.greenSoft, fg: BRAND.green }, gray: { bg: "#ECE9E1", fg: BRAND.inkSoft },
+  };
+  const t = tones[tone] || tones.gray;
+  return <span style={{ background: t.bg, color: t.fg, fontSize: 12, fontWeight: 600, padding: "3px 9px", borderRadius: 999, whiteSpace: "nowrap" }}>{children}</span>;
+}
+function dueBadge(dateStr, completedFlag) {
+  if (completedFlag === "YES") return <Badge tone="green">Completed</Badge>;
+  const d = daysUntil(dateStr);
+  if (d === null) return <Badge tone="gray">No date</Badge>;
+  if (d < 0) return <Badge tone="red">Overdue {Math.abs(d)}d</Badge>;
+  if (d <= 30) return <Badge tone="amber">Due in {d}d</Badge>;
+  return <Badge tone="green">On track</Badge>;
+}
+
+function Field({ f, value, onChange, branches }) {
+  const common = { style: { width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${BRAND.line}`, fontSize: 14, fontFamily: f.mono ? "ui-monospace, monospace" : "inherit", background: "#fff", color: BRAND.ink } };
+  if (f.type === "select") {
+    return <select {...common} value={value || ""} onChange={(e) => onChange(e.target.value)}>
+      <option value="">Select...</option>
+      {f.options.map((o) => <option key={o} value={o}>{o}</option>)}
+    </select>;
+  }
+  if (f.branchRef) {
+    return <React.Fragment>
+      <input {...common} list="branch-options" value={value || ""} onChange={(e) => onChange(e.target.value)} placeholder="e.g. ICIC0000924" />
+      <datalist id="branch-options">{branches.map((b) => <option key={b.solId} value={b.solId}>{b.name}</option>)}</datalist>
+    </React.Fragment>;
+  }
+  return <input {...common} type={f.type === "date" ? "date" : f.type === "number" ? "number" : f.type === "email" ? "email" : "text"} value={value || ""} onChange={(e) => onChange(e.target.value)} />;
+}
+
+function ModalShell({ title, onClose, children, footer, wide }) {
+  return (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(28,43,57,0.45)", display: "flex", alignItems: "flex-start", justifyContent: "center", padding: "5vh 16px", zIndex: 50, overflowY: "auto" }}>
+      <div style={{ background: BRAND.card, borderRadius: 14, width: "100%", maxWidth: wide ? 760 : 680, boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", padding: "18px 22px", borderBottom: `1px solid ${BRAND.line}` }}>
+          <h2 style={{ margin: 0, fontSize: 17, fontWeight: 600, color: BRAND.ink, fontFamily: "Georgia, serif" }}>{title}</h2>
+          <button onClick={onClose} style={{ background: "none", border: "none", cursor: "pointer", color: BRAND.inkSoft, fontSize: 18 }}>✕</button>
+        </div>
+        <div style={{ padding: "20px 22px", maxHeight: "65vh", overflowY: "auto" }}>{children}</div>
+        <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, padding: "16px 22px", borderTop: `1px solid ${BRAND.line}` }}>{footer}</div>
+      </div>
+    </div>
+  );
+}
+
+function RecordModal({ schema, record, branches, onSave, onClose, title }) {
+  const [form, setForm] = useState(record || {});
+  const [saving, setSaving] = useState(false);
+  const missing = schema.filter((f) => f.required && !form[f.key]);
+  return (
+    <ModalShell title={title} onClose={onClose}
+      footer={<React.Fragment>
+        <button onClick={onClose} style={{ padding: "9px 16px", borderRadius: 8, border: `1px solid ${BRAND.line}`, background: "#fff", color: BRAND.ink, fontSize: 14, cursor: "pointer" }}>Cancel</button>
+        <button disabled={missing.length > 0 || saving}
+          onClick={async () => { setSaving(true); await onSave({ ...form, id: form.id || uid() }); setSaving(false); }}
+          style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: missing.length ? "#C9C2AF" : BRAND.ink, color: "#fff", fontSize: 14, fontWeight: 600, cursor: missing.length ? "not-allowed" : "pointer" }}>
+          {saving ? "Saving..." : "Save record"}
+        </button>
+      </React.Fragment>}>
+      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
+        {schema.map((f) => (
+          <div key={f.key} style={{ gridColumn: f.full ? "1 / -1" : "auto" }}>
+            <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: BRAND.inkSoft, marginBottom: 5 }}>
+              {f.label}{f.required && <span style={{ color: BRAND.red }}> *</span>}
+            </label>
+            <Field f={f} value={form[f.key]} onChange={(v) => setForm({ ...form, [f.key]: v })} branches={branches} />
+          </div>
+        ))}
+      </div>
+    </ModalShell>
+  );
+}
+
+function normKey(s) { return String(s || "").toLowerCase().replace(/[^a-z0-9]/g, ""); }
+function guessMapping(schema, headers) {
+  const map = {};
+  schema.forEach((f) => {
+    let best = "";
+    headers.forEach((h) => {
+      const nh = normKey(h);
+      if (!nh) return;
+      if (nh.includes(normKey(f.key)) || nh.includes(normKey(f.label)) || normKey(f.label).includes(nh)) { if (!best) best = h; }
+    });
+    map[f.key] = best;
+  });
+  return map;
+}
+
+function ImportModal({ schema, tabLabel, onImport, onClose }) {
+  const [fileName, setFileName] = useState("");
+  const [headers, setHeaders] = useState([]);
+  const [sheetRows, setSheetRows] = useState([]);
+  const [mapping, setMapping] = useState({});
+  const [error, setError] = useState("");
+  const [busy, setBusy] = useState(false);
+  const fileInput = useRef(null);
+
+  function handleFile(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    setError(""); setFileName(file.name);
+    const reader = new FileReader();
+    reader.onload = (evt) => {
+      try {
+        const wb = XLSX.read(evt.target.result, { type: "binary" });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const json = XLSX.utils.sheet_to_json(ws, { defval: "", raw: false });
+        if (json.length === 0) { setError("That file has no data rows."); return; }
+        const hdrs = Object.keys(json[0]);
+        setHeaders(hdrs); setSheetRows(json); setMapping(guessMapping(schema, hdrs));
+      } catch (err) { setError("Couldn't read that file. Use a .csv or .xlsx export."); }
+    };
+    reader.readAsBinaryString(file);
+  }
+
+  async function confirmImport() {
+    const required = schema.filter((f) => f.required);
+    const missingMap = required.filter((f) => !mapping[f.key]);
+    if (missingMap.length) { setError(`Map a column for: ${missingMap.map((f) => f.label).join(", ")}`); return; }
+    const records = sheetRows.map((row) => {
+      const rec = { id: uid() };
+      schema.forEach((f) => { rec[f.key] = mapping[f.key] ? String(row[mapping[f.key]] ?? "").trim() : ""; });
+      return rec;
+    }).filter((rec) => required.every((f) => rec[f.key]));
+    setBusy(true);
+    try { await onImport(records); } finally { setBusy(false); }
+  }
+
+  return (
+    <ModalShell title={`Import into ${tabLabel}`} onClose={onClose} wide
+      footer={<React.Fragment>
+        <button onClick={onClose} style={{ padding: "9px 16px", borderRadius: 8, border: `1px solid ${BRAND.line}`, background: "#fff", color: BRAND.ink, fontSize: 14, cursor: "pointer" }}>Cancel</button>
+        {headers.length > 0 && <button onClick={confirmImport} disabled={busy} style={{ padding: "9px 18px", borderRadius: 8, border: "none", background: BRAND.ink, color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>{busy ? "Importing..." : `Import ${sheetRows.length} rows`}</button>}
+      </React.Fragment>}>
+      {!headers.length ? (
+        <div onClick={() => fileInput.current.click()} style={{ border: `2px dashed ${BRAND.line}`, borderRadius: 12, padding: "40px 20px", textAlign: "center", cursor: "pointer", color: BRAND.inkSoft }}>
+          <div style={{ fontWeight: 600, color: BRAND.ink, marginBottom: 4 }}>Click to choose a .csv or .xlsx file</div>
+          <div style={{ fontSize: 13 }}>Any spreadsheet works — you'll match its columns to fields next.</div>
+          <input ref={fileInput} type="file" accept=".csv,.xlsx,.xls" onChange={handleFile} style={{ display: "none" }} />
+        </div>
+      ) : (
+        <React.Fragment>
+          <div style={{ fontSize: 13, color: BRAND.inkSoft, marginBottom: 14 }}>{fileName} — {sheetRows.length} rows found. Match each field to a column.</div>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
+            {schema.map((f) => (
+              <div key={f.key}>
+                <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: BRAND.inkSoft, marginBottom: 5 }}>{f.label}{f.required && <span style={{ color: BRAND.red }}> *</span>}</label>
+                <select value={mapping[f.key] || ""} onChange={(e) => setMapping({ ...mapping, [f.key]: e.target.value })} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${BRAND.line}`, fontSize: 13.5, background: "#fff" }}>
+                  <option value="">-- don't import --</option>
+                  {headers.map((h) => <option key={h} value={h}>{h}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+        </React.Fragment>
+      )}
+      {error && <div style={{ marginTop: 14, color: BRAND.red, fontSize: 13.5 }}>{error}</div>}
+    </ModalShell>
+  );
+}
+
+function SettingsModal({ me, onClose }) {
+  const [tab, setTab] = useState("password");
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [newUsername, setNewUsername] = useState("");
+  const [newUserPassword, setNewUserPassword] = useState("");
+  const [msg, setMsg] = useState("");
+  const [err, setErr] = useState("");
+
+  async function changePassword() {
+    setErr(""); setMsg("");
+    try { await api("/change-password", { method: "POST", body: JSON.stringify({ currentPassword, newPassword }) }); setMsg("Password updated."); setCurrentPassword(""); setNewPassword(""); }
+    catch (e) { setErr(e.message); }
+  }
+  async function addTeammate() {
+    setErr(""); setMsg("");
+    try { await api("/users", { method: "POST", body: JSON.stringify({ username: newUsername, password: newUserPassword }) }); setMsg(`Account "${newUsername}" created — share the password with them directly.`); setNewUsername(""); setNewUserPassword(""); }
+    catch (e) { setErr(e.message); }
+  }
+
+  return (
+    <ModalShell title="Settings" onClose={onClose} footer={<button onClick={onClose} style={{ padding: "9px 16px", borderRadius: 8, border: `1px solid ${BRAND.line}`, background: "#fff", color: BRAND.ink, fontSize: 14, cursor: "pointer" }}>Close</button>}>
+      <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+        <button onClick={() => setTab("password")} style={{ padding: "7px 14px", borderRadius: 8, border: `1px solid ${BRAND.line}`, background: tab === "password" ? BRAND.ink : "#fff", color: tab === "password" ? "#fff" : BRAND.ink, fontSize: 13, cursor: "pointer" }}>Change password</button>
+        <button onClick={() => setTab("teammate")} style={{ padding: "7px 14px", borderRadius: 8, border: `1px solid ${BRAND.line}`, background: tab === "teammate" ? BRAND.ink : "#fff", color: tab === "teammate" ? "#fff" : BRAND.ink, fontSize: 13, cursor: "pointer" }}>Add teammate</button>
+      </div>
+      {tab === "password" ? (
+        <div style={{ display: "grid", gap: 12, maxWidth: 320 }}>
+          <div><label style={{ display: "block", fontSize: 12, fontWeight: 600, color: BRAND.inkSoft, marginBottom: 5 }}>Current password</label>
+            <input type="password" value={currentPassword} onChange={(e) => setCurrentPassword(e.target.value)} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${BRAND.line}` }} /></div>
+          <div><label style={{ display: "block", fontSize: 12, fontWeight: 600, color: BRAND.inkSoft, marginBottom: 5 }}>New password (8+ characters)</label>
+            <input type="password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${BRAND.line}` }} /></div>
+          <button onClick={changePassword} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: BRAND.ink, color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer", width: "fit-content" }}>Update password</button>
+        </div>
+      ) : (
+        <div style={{ display: "grid", gap: 12, maxWidth: 320 }}>
+          <div><label style={{ display: "block", fontSize: 12, fontWeight: 600, color: BRAND.inkSoft, marginBottom: 5 }}>Username</label>
+            <input value={newUsername} onChange={(e) => setNewUsername(e.target.value)} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${BRAND.line}` }} /></div>
+          <div><label style={{ display: "block", fontSize: 12, fontWeight: 600, color: BRAND.inkSoft, marginBottom: 5 }}>Temporary password (8+ characters)</label>
+            <input value={newUserPassword} onChange={(e) => setNewUserPassword(e.target.value)} style={{ width: "100%", padding: "8px 10px", borderRadius: 8, border: `1px solid ${BRAND.line}` }} /></div>
+          <button onClick={addTeammate} style={{ padding: "9px 16px", borderRadius: 8, border: "none", background: BRAND.ink, color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer", width: "fit-content" }}>Create account</button>
+        </div>
+      )}
+      {msg && <div style={{ marginTop: 14, color: BRAND.green, fontSize: 13.5 }}>{msg}</div>}
+      {err && <div style={{ marginTop: 14, color: BRAND.red, fontSize: 13.5 }}>{err}</div>}
+    </ModalShell>
+  );
+}
+
+function DataTable({ schema, rows, branches, onEdit, onDelete, dueKey, completedKey }) {
+  const cols = schema.slice(0, 7);
+  const branchName = (solId) => (branches.find((b) => b.solId === solId) || {}).name;
+  return (
+    <div style={{ overflowX: "auto", border: `1px solid ${BRAND.line}`, borderRadius: 12, background: "#fff" }}>
+      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13.5 }}>
+        <thead><tr style={{ background: BRAND.paper }}>
+          {cols.map((c) => <th key={c.key} style={{ textAlign: "left", padding: "10px 14px", color: BRAND.inkSoft, fontWeight: 600, borderBottom: `1px solid ${BRAND.line}`, whiteSpace: "nowrap" }}>{c.label}</th>)}
+          {dueKey && <th style={{ textAlign: "left", padding: "10px 14px", color: BRAND.inkSoft, fontWeight: 600, borderBottom: `1px solid ${BRAND.line}` }}>Due status</th>}
+          <th style={{ padding: "10px 14px", borderBottom: `1px solid ${BRAND.line}` }}></th>
+        </tr></thead>
+        <tbody>
+          {rows.length === 0 && <tr><td colSpan={cols.length + 2} style={{ padding: 28, textAlign: "center", color: BRAND.inkSoft }}>No records yet. Add the first one.</td></tr>}
+          {rows.map((r) => (
+            <tr key={r.id} style={{ borderBottom: `1px solid ${BRAND.line}` }}>
+              {cols.map((c) => <td key={c.key} style={{ padding: "10px 14px", color: BRAND.ink, fontFamily: c.mono ? "ui-monospace, monospace" : "inherit", whiteSpace: "nowrap" }}>
+                {c.type === "date" ? fmtDate(r[c.key]) : (c.key === "solId" && branchName(r[c.key]) ? `${r[c.key]} · ${branchName(r[c.key])}` : (r[c.key] || "—"))}
+              </td>)}
+              {dueKey && <td style={{ padding: "10px 14px" }}>{dueBadge(r[dueKey], completedKey ? r[completedKey] : undefined)}</td>}
+              <td style={{ padding: "10px 14px", textAlign: "right", whiteSpace: "nowrap" }}>
+                <button onClick={() => onEdit(r)} style={{ background: "none", border: "none", cursor: "pointer", color: BRAND.inkSoft, marginRight: 10, fontSize: 13 }}>Edit</button>
+                <button onClick={() => onDelete(r.id)} style={{ background: "none", border: "none", cursor: "pointer", color: BRAND.red, fontSize: 13 }}>Delete</button>
+              </td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+function MetricCard({ label, value, tone }) {
+  const tones = { red: BRAND.red, amber: BRAND.amber, green: BRAND.green, ink: BRAND.ink };
+  return <div style={{ background: "#fff", border: `1px solid ${BRAND.line}`, borderRadius: 12, padding: "16px 18px", flex: 1, minWidth: 140 }}>
+    <div style={{ fontSize: 12, color: BRAND.inkSoft, fontWeight: 600, marginBottom: 6 }}>{label}</div>
+    <div style={{ fontSize: 28, fontWeight: 700, color: tones[tone] || BRAND.ink, fontFamily: "Georgia, serif" }}>{value}</div>
+  </div>;
+}
+
+function Login({ onLoggedIn }) {
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e) {
+    e.preventDefault();
+    setErr(""); setBusy(true);
+    try {
+      const res = await fetch("/api/login", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ username, password }) });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Sign in failed");
+      localStorage.setItem(TOKEN_KEY, data.token);
+      onLoggedIn(data);
+    } catch (e2) { setErr(e2.message); } finally { setBusy(false); }
+  }
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", background: BRAND.paper }}>
+      <form onSubmit={submit} style={{ background: "#fff", padding: "32px 30px", borderRadius: 14, width: 340, border: `1px solid ${BRAND.line}` }}>
+        <div style={{ fontFamily: "Georgia, serif", fontSize: 20, fontWeight: 700, color: BRAND.ink, marginBottom: 2 }}>Scale Ops</div>
+        <div style={{ fontSize: 13, color: BRAND.inkSoft, marginBottom: 22 }}>Sign in to the weighing machine tracker</div>
+        <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: BRAND.inkSoft, marginBottom: 5 }}>Username</label>
+        <input value={username} onChange={(e) => setUsername(e.target.value)} style={{ width: "100%", padding: "9px 11px", borderRadius: 8, border: `1px solid ${BRAND.line}`, marginBottom: 14, fontSize: 14 }} autoFocus />
+        <label style={{ display: "block", fontSize: 12, fontWeight: 600, color: BRAND.inkSoft, marginBottom: 5 }}>Password</label>
+        <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} style={{ width: "100%", padding: "9px 11px", borderRadius: 8, border: `1px solid ${BRAND.line}`, marginBottom: 18, fontSize: 14 }} />
+        {err && <div style={{ color: BRAND.red, fontSize: 13, marginBottom: 14 }}>{err}</div>}
+        <button disabled={busy} type="submit" style={{ width: "100%", padding: "10px", borderRadius: 8, border: "none", background: BRAND.ink, color: "#fff", fontSize: 14, fontWeight: 600, cursor: "pointer" }}>{busy ? "Signing in..." : "Sign in"}</button>
+      </form>
+    </div>
+  );
+}
+
+function Dashboard() {
+  const [me, setMe] = useState(null);
+  const [tab, setTab] = useState("dashboard");
+  const [branches, setBranches] = useState([]);
+  const [orders, setOrders] = useState([]);
+  const [restampings, setRestampings] = useState([]);
+  const [replacements, setReplacements] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState("");
+  const [modal, setModal] = useState(null);
+  const [importOpen, setImportOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [bellOpen, setBellOpen] = useState(false);
+  const [seenIds, setSeenIds] = useState(() => JSON.parse(localStorage.getItem("scaleops_seen") || "[]"));
+  const [live, setLive] = useState(false);
+
+  const dataMap = { branches: [branches, setBranches], orders: [orders, setOrders], restampings: [restampings, setRestampings], replacements: [replacements, setReplacements] };
+
+  async function loadType(type) { dataMap[type][1](await api(`/${type}`)); }
+  async function loadAll() { await Promise.all(Object.keys(dataMap).map(loadType)); }
+
+  useEffect(() => {
+    (async () => {
+      try { setMe(await api("/me")); await loadAll(); setLive(true); } catch (e) {}
+      setLoading(false);
+    })();
+    // No WebSockets on Netlify Functions, so instead we poll for fresh data
+    // every few seconds. Teammates' changes show up on a short delay rather
+    // than instantly.
+    const POLL_MS = 7000;
+    const interval = setInterval(async () => {
+      try { await loadAll(); setLive(true); } catch (e) { setLive(false); }
+    }, POLL_MS);
+    return () => clearInterval(interval);
+  }, []);
+
+  function markAllSeen(ids) {
+    const next = Array.from(new Set([...seenIds, ...ids]));
+    setSeenIds(next);
+    localStorage.setItem("scaleops_seen", JSON.stringify(next));
+  }
+
+  function openAdd(type) { setModal({ type, record: null }); }
+  function openEdit(type, record) { setModal({ type, record }); }
+
+  async function saveRecord(type, record) {
+    const exists = dataMap[type][0].some((r) => r.id === record.id);
+    if (exists) await api(`/${type}/${record.id}`, { method: "PUT", body: JSON.stringify(record) });
+    else await api(`/${type}`, { method: "POST", body: JSON.stringify(record) });
+    await loadType(type);
+    setModal(null);
+  }
+  async function deleteRecord(type, id) { await api(`/${type}/${id}`, { method: "DELETE" }); await loadType(type); }
+  async function importRecords(type, records) { await api(`/${type}/bulk`, { method: "POST", body: JSON.stringify({ records }) }); await loadType(type); setImportOpen(false); }
+
+  function filtered(rows) {
+    if (!search.trim()) return rows;
+    const q = search.toLowerCase();
+    return rows.filter((r) => Object.values(r).some((v) => String(v || "").toLowerCase().includes(q)));
+  }
+
+  const alerts = useMemo(() => {
+    const list = [];
+    orders.forEach((o) => {
+      const d = daysUntil(o.dueDate);
+      if (d !== null && d <= 30 && o.status !== "Order cancelled") list.push({ id: `o-due-${o.id}`, severity: d < 0 ? "red" : "amber", text: `PO ${o.poNumber} (${o.solId}) — certificate renewal ${d < 0 ? `overdue by ${-d}d` : `due in ${d}d`}` });
+      const dd = daysUntil(o.estDeliveryDate);
+      if (dd !== null && dd < 0 && o.status !== "Delivered" && o.status !== "Order cancelled") list.push({ id: `o-late-${o.id}`, severity: "red", text: `PO ${o.poNumber} (${o.solId}) — delivery overdue by ${-dd}d, still marked "${o.status || "pending"}"` });
+    });
+    restampings.forEach((r) => {
+      if (r.jobCompleted === "YES") return;
+      const d = daysUntil(r.dueDate);
+      if (d !== null && d <= 30) list.push({ id: `r-due-${r.id}`, severity: d < 0 ? "red" : "amber", text: `Restamping PO ${r.poNumber} (${r.solId}) — ${d < 0 ? `overdue by ${-d}d` : `due in ${d}d`}` });
+    });
+    replacements.forEach((r) => {
+      if (r.dateDispatch && !r.dateDelivery) {
+        const d = daysUntil(r.dateDispatch);
+        if (d !== null && d < -7) list.push({ id: `p-late-${r.id}`, severity: "amber", text: `${r.type || "Replacement"} for ${r.solId} — dispatched ${-d}d ago, delivery not yet logged` });
+      }
+    });
+    return list.sort((a, b) => (a.severity === "red" ? -1 : 1) - (b.severity === "red" ? -1 : 1));
+  }, [orders, restampings, replacements]);
+
+  const counts = useMemo(() => ({
+    overdue: alerts.filter((a) => a.severity === "red").length,
+    dueSoon: alerts.filter((a) => a.severity === "amber").length,
+    orders: orders.length, restampings: restampings.length,
+  }), [alerts, orders, restampings]);
+
+  const activeSchema = FIELD_SCHEMAS[modal && modal.type];
+  const unseenCount = alerts.filter((a) => !seenIds.includes(a.id)).length;
+
+  return (
+    <div style={{ display: "flex", minHeight: "100vh", background: BRAND.paper, fontFamily: "Inter, system-ui, sans-serif" }}>
+      <aside style={{ width: 220, background: BRAND.ink, color: "#fff", padding: "24px 14px", flexShrink: 0, display: "flex", flexDirection: "column" }}>
+        <div style={{ fontFamily: "Georgia, serif", fontSize: 18, fontWeight: 700, marginBottom: 4, padding: "0 8px" }}>Scale Ops</div>
+        <div style={{ fontSize: 12, color: "#9FB0BD", marginBottom: 8, padding: "0 8px", display: "flex", alignItems: "center", gap: 6 }}>
+          <span style={{ width: 7, height: 7, borderRadius: 999, background: live ? "#5FBF7A" : "#8A8A8A", display: "inline-block" }}></span>
+          {live ? "Auto-refreshing (~7s)" : "Connecting..."}
+        </div>
+        <div style={{ fontSize: 12, color: "#9FB0BD", marginBottom: 22, padding: "0 8px" }}>{me ? `Signed in as ${me.username}` : ""}</div>
+        {TABS.map((t) => {
+          const active = tab === t.key;
+          return (
+            <button key={t.key} onClick={() => setTab(t.key)} style={{ display: "flex", alignItems: "center", gap: 10, width: "100%", textAlign: "left", padding: "9px 10px", borderRadius: 8, marginBottom: 2, border: "none", cursor: "pointer", background: active ? "rgba(255,255,255,0.12)" : "transparent", color: active ? "#fff" : "#B9C4CC", fontSize: 14, fontWeight: active ? 600 : 500 }}>
+              {t.label}
+              {t.key === "dashboard" && counts.overdue > 0 && <span style={{ marginLeft: "auto", background: BRAND.red, color: "#fff", fontSize: 11, fontWeight: 700, borderRadius: 999, padding: "1px 7px" }}>{counts.overdue}</span>}
+            </button>
+          );
+        })}
+        <div style={{ marginTop: "auto" }}>
+          <button onClick={() => setSettingsOpen(true)} style={{ display: "block", width: "100%", textAlign: "left", padding: "9px 10px", borderRadius: 8, border: "none", cursor: "pointer", background: "transparent", color: "#B9C4CC", fontSize: 13.5 }}>Settings</button>
+          <button onClick={() => { localStorage.removeItem(TOKEN_KEY); window.location.reload(); }} style={{ display: "block", width: "100%", textAlign: "left", padding: "9px 10px", borderRadius: 8, border: "none", cursor: "pointer", background: "transparent", color: "#B9C4CC", fontSize: 13.5 }}>Sign out</button>
+        </div>
+      </aside>
+
+      <main style={{ flex: 1, padding: "28px 34px", maxWidth: 1200 }}>
+        <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 18, position: "relative" }}>
+          <button onClick={() => { const opening = !bellOpen; setBellOpen(opening); if (opening) markAllSeen(alerts.map((a) => a.id)); }}
+            style={{ position: "relative", background: "#fff", border: `1px solid ${BRAND.line}`, borderRadius: 9, padding: "9px 13px", cursor: "pointer", color: BRAND.ink, fontSize: 14 }}>
+            Notifications
+            {unseenCount > 0 && <span style={{ position: "absolute", top: -6, right: -6, background: BRAND.red, color: "#fff", fontSize: 10, fontWeight: 700, borderRadius: 999, padding: "1px 5px" }}>{unseenCount}</span>}
+          </button>
+          {bellOpen && (
+            <div style={{ position: "absolute", top: 44, right: 0, width: 380, background: "#fff", border: `1px solid ${BRAND.line}`, borderRadius: 12, boxShadow: "0 12px 32px rgba(0,0,0,0.16)", zIndex: 40, maxHeight: 360, overflowY: "auto" }}>
+              <div style={{ padding: "12px 16px", borderBottom: `1px solid ${BRAND.line}`, fontWeight: 600, fontSize: 14, color: BRAND.ink }}>Notifications</div>
+              {alerts.length === 0 && <div style={{ padding: 18, color: BRAND.inkSoft, fontSize: 13.5 }}>Nothing needs attention.</div>}
+              {alerts.map((a) => (
+                <div key={a.id} style={{ display: "flex", gap: 9, padding: "11px 16px", borderBottom: `1px solid ${BRAND.line}` }}>
+                  <span style={{ color: a.severity === "red" ? BRAND.red : BRAND.amber, fontWeight: 700 }}>●</span>
+                  <span style={{ fontSize: 13, color: BRAND.ink, lineHeight: 1.4 }}>{a.text}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {loading ? <div style={{ color: BRAND.inkSoft }}>Loading records...</div> : tab === "dashboard" ? (
+          <React.Fragment>
+            <h1 style={{ fontFamily: "Georgia, serif", fontSize: 24, color: BRAND.ink, marginBottom: 4 }}>Dashboard</h1>
+            <p style={{ color: BRAND.inkSoft, marginTop: 0, marginBottom: 22, fontSize: 14 }}>What needs attention right now, across every workflow.</p>
+            <div style={{ display: "flex", gap: 14, marginBottom: 26, flexWrap: "wrap" }}>
+              <MetricCard label="Overdue items" value={counts.overdue} tone="red" />
+              <MetricCard label="Due within 30 days" value={counts.dueSoon} tone="amber" />
+              <MetricCard label="Active orders" value={counts.orders} tone="ink" />
+              <MetricCard label="Restamping cases" value={counts.restampings} tone="ink" />
+            </div>
+            <h3 style={{ fontSize: 15, color: BRAND.ink, marginBottom: 10 }}>Notification queue</h3>
+            <div style={{ background: "#fff", border: `1px solid ${BRAND.line}`, borderRadius: 12 }}>
+              {alerts.length === 0 && <div style={{ padding: 22, color: BRAND.inkSoft, fontSize: 14 }}>Nothing urgent — all tracked dates are more than 30 days out.</div>}
+              {alerts.map((a, i) => (
+                <div key={i} style={{ display: "flex", alignItems: "center", gap: 10, padding: "12px 16px", borderBottom: i < alerts.length - 1 ? `1px solid ${BRAND.line}` : "none" }}>
+                  <span style={{ color: a.severity === "red" ? BRAND.red : BRAND.amber, fontWeight: 700 }}>●</span>
+                  <span style={{ fontSize: 13.5, color: BRAND.ink }}>{a.text}</span>
+                </div>
+              ))}
+            </div>
+          </React.Fragment>
+        ) : (
+          <React.Fragment>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 18 }}>
+              <div>
+                <h1 style={{ fontFamily: "Georgia, serif", fontSize: 24, color: BRAND.ink, margin: 0 }}>{TABS.find((t) => t.key === tab).label}</h1>
+                <p style={{ color: BRAND.inkSoft, margin: "4px 0 0", fontSize: 14 }}>{dataMap[tab][0].length} record{dataMap[tab][0].length === 1 ? "" : "s"}</p>
+              </div>
+              <div style={{ display: "flex", gap: 10 }}>
+                <button onClick={() => setImportOpen(true)} style={{ background: "#fff", color: BRAND.ink, border: `1px solid ${BRAND.line}`, padding: "10px 16px", borderRadius: 9, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Import</button>
+                <button onClick={() => openAdd(tab)} style={{ background: BRAND.ink, color: "#fff", border: "none", padding: "10px 16px", borderRadius: 9, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>Add record</button>
+              </div>
+            </div>
+            <div style={{ marginBottom: 16, maxWidth: 320 }}>
+              <input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search this table..." style={{ width: "100%", padding: "9px 12px", borderRadius: 8, border: `1px solid ${BRAND.line}`, fontSize: 14 }} />
+            </div>
+            <DataTable schema={FIELD_SCHEMAS[tab]} rows={filtered(dataMap[tab][0])} branches={branches}
+              onEdit={(r) => openEdit(tab, r)} onDelete={(id) => deleteRecord(tab, id)}
+              dueKey={tab === "orders" || tab === "restampings" ? "dueDate" : null}
+              completedKey={tab === "restampings" ? "jobCompleted" : null} />
+          </React.Fragment>
+        )}
+      </main>
+
+      {importOpen && <ImportModal schema={FIELD_SCHEMAS[tab]} tabLabel={TABS.find((t) => t.key === tab).label} onImport={(records) => importRecords(tab, records)} onClose={() => setImportOpen(false)} />}
+      {modal && <RecordModal title={modal.record ? "Edit record" : "Add record"} schema={activeSchema} record={modal.record} branches={branches} onClose={() => setModal(null)} onSave={(rec) => saveRecord(modal.type, rec)} />}
+      {settingsOpen && <SettingsModal me={me} onClose={() => setSettingsOpen(false)} />}
+    </div>
+  );
+}
+
+function App() {
+  const [loggedIn, setLoggedIn] = useState(!!localStorage.getItem(TOKEN_KEY));
+  if (!loggedIn) return <Login onLoggedIn={() => setLoggedIn(true)} />;
+  return <Dashboard />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
