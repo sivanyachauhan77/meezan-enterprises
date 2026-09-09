@@ -154,9 +154,13 @@ TYPES.forEach((type) => {
 
 const expressHandler = serverless(app);
 
-// Netlify hands us the full path including "/.netlify/functions/api" —
-// strip that prefix so Express sees "/login", "/branches", etc.
+// Netlify can hand us either "/.netlify/functions/api/login" or
+// "/api/login" depending on how the redirect resolves — strip whichever
+// prefix is present so Express reliably sees "/login", "/branches", etc.
 module.exports.handler = async (event, context) => {
-  event.path = event.path.replace(/^\/\.netlify\/functions\/api/, "") || "/";
+  let path = event.path || "/";
+  path = path.replace(/^\/\.netlify\/functions\/api/, "");
+  path = path.replace(/^\/api/, "");
+  event.path = path || "/";
   return expressHandler(event, context);
 };
